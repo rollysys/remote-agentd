@@ -1,0 +1,13 @@
+[package]
+name = "hashline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+xxhash-rust.workspace = true
+similar.workspace = true
+regex.workspace = true
