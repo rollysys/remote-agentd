@@ -9,7 +9,7 @@ A lightweight Rust MCP (Model Context Protocol) stdio server that runs on remote
 - **Pi-compatible output** — `[path#TAG]` headers, numbered lines, hashline tags match the local pi tool format exactly
 - **6 tools**: `remote_read`, `remote_edit`, `remote_search`, `remote_bash`, `remote_find`, `remote_write`
 - **Tiny footprint** — 2.4MB binary, <5MB RSS, <1% CPU on ARM boards
-- **Cross-platform** — Static binary for x86_64 and aarch64 Linux, plus macOS and Windows
+- **Cross-platform** — Fully static musl binaries for x86_64/aarch64 Linux (no glibc dependency), plus macOS and Windows
 
 ## Quick Start
 
@@ -88,12 +88,14 @@ INS.TAIL:
 # Native build
 cargo build --release
 
-# Cross-compile for aarch64
-cargo build --release --target aarch64-unknown-linux-gnu
-
-# Cross-compile for musl (fully static)
+# Cross-compile for aarch64 Linux (fully static musl)
 cargo build --release --target aarch64-unknown-linux-musl
+
+# Cross-compile for x86_64 Linux (fully static musl)
+cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+> Linux release binaries are built with musl for fully static linking — drop them on any Linux host (glibc or musl) with no runtime dependency.
 
 ## Testing
 
