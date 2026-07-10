@@ -89,7 +89,7 @@ impl FetchTool {
             abs_path.display(),
             meta.size,
             sha256,
-            mode,
+            mode & 0o7777,
             owner,
             group,
             abs = abs_path.display()
@@ -106,7 +106,7 @@ impl FetchTool {
                 "abs_path": abs_path.to_string_lossy(),
                 "size": meta.size,
                 "sha256": sha256,
-                "mode": format!("{:o}", mode),
+                "mode": format!("{:o}", mode & 0o7777),
                 "owner": owner,
                 "group": group
             }
@@ -162,4 +162,89 @@ fn compute_checksum_cmd(path: &Path, sudo: bool) -> Result<String> {
         path.display(),
         tried
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "agentd_fetch_test_{}_{}",
+            std::process::id(),
+            name
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn fetch_returns_metadata_for_file() {
+        let d = tmp("meta");
+        let f = d.join("data.bin");
+        fs::write(&f, "hello world\n").unwrap();
+
+        let args = json!({ "path": f.to_str().unwrap() });
+        let res = FetchTool::execute(&args).unwrap();
+
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("remote_fetch: ready for sideband transfer"));
+        assert!(text.contains(&f.to_string_lossy().to_string()));
+        assert!(text.contains("size:      12 bytes"));
+        assert!(text.contains("sha256:"));
+
+        let meta = &res["metadata"];
+        assert_eq!(meta["size"], 12);
+        assert_eq!(meta["abs_path"].as_str().unwrap(), &*f.to_string_lossy());
+        assert!(meta["sha256"].as_str().unwrap().len() == 64);
+    }
+
+    #[test]
+    fn fetch_rejects_directory() {
+        let d = tmp("dir");
+        let args = json!({ "path": d.to_str().unwrap() });
+        let res = FetchTool::execute(&args);
+        assert!(res.is_err());
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("directory"));
+    }
+
+    #[test]
+    fn fetch_sha256_matches_external() {
+        let d = tmp("sha");
+        let f = d.join("known.txt");
+        let content = "The quick brown fox\n";
+        fs::write(&f, content).unwrap();
+
+        let args = json!({ "path": f.to_str().unwrap() });
+        let res = FetchTool::execute(&args).unwrap();
+        let hash = res["metadata"]["sha256"].as_str().unwrap();
+
+        // Verify against an independent computation using the same tool.
+        let recomputed = compute_checksum_cmd(&f, false).unwrap();
+        assert_eq!(hash, recomputed);
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn fetch_missing_path_errors() {
+        let args = json!({ "path": "/nonexistent/path/no/such/file" });
+        let res = FetchTool::execute(&args);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn fetch_includes_client_instructions() {
+        let d = tmp("instr");
+        let f = d.join("x.txt");
+        fs::write(&f, "x").unwrap();
+
+        let args = json!({ "path": f.to_str().unwrap() });
+        let res = FetchTool::execute(&args).unwrap();
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("scp") || text.contains("rsync"));
+        assert!(text.contains("does not transit the MCP"));
+    }
 }

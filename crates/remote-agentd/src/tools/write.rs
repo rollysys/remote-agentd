@@ -86,3 +86,134 @@ impl WriteTool {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "agentd_write_test_{}_{}",
+            std::process::id(),
+            name
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn write_basic_creates_file() {
+        let d = tmp("basic");
+        let f = d.join("basic.txt");
+
+        let args = json!({ "path": f.to_str().unwrap(), "content": "hello\n" });
+        let res = WriteTool::execute(&args).unwrap();
+
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Wrote 6 bytes"));
+        assert_eq!(fs::read_to_string(&f).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn write_creates_parent_dirs() {
+        let d = tmp("parents");
+        let f = d.join("a/b/c/deep.txt");
+
+        let args = json!({ "path": f.to_str().unwrap(), "content": "deep\n" });
+        WriteTool::execute(&args).unwrap();
+
+        assert!(f.exists());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "deep\n");
+    }
+
+    #[test]
+    fn write_overwrites_existing() {
+        let d = tmp("overwrite");
+        let f = d.join("over.txt");
+        fs::write(&f, "old content").unwrap();
+
+        let args = json!({ "path": f.to_str().unwrap(), "content": "new" });
+        WriteTool::execute(&args).unwrap();
+
+        assert_eq!(fs::read_to_string(&f).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_with_mode_param() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let d = tmp("mode");
+        let f = d.join("moded.txt");
+
+        let args = json!({
+            "path": f.to_str().unwrap(),
+            "content": "data",
+            "mode": "600"
+        });
+        WriteTool::execute(&args).unwrap();
+
+        let mode = fs::metadata(&f).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode should be 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_with_mode_0o_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let d = tmp("modeo");
+        let f = d.join("moded2.txt");
+
+        let args = json!({
+            "path": f.to_str().unwrap(),
+            "content": "data",
+            "mode": "0o755"
+        });
+        WriteTool::execute(&args).unwrap();
+
+        let mode = fs::metadata(&f).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "mode should be 0755 with 0o prefix");
+    }
+
+    #[test]
+    fn write_mode_param_in_result_text() {
+        let d = tmp("mode_text");
+        let f = d.join("mt.txt");
+
+        let args = json!({
+            "path": f.to_str().unwrap(),
+            "content": "x",
+            "mode": "644"
+        });
+        let res = WriteTool::execute(&args).unwrap();
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("mode=644"));
+    }
+
+    #[test]
+    fn write_invalid_mode_errors() {
+        let d = tmp("bad_mode");
+        let f = d.join("bad.txt");
+
+        let args = json!({
+            "path": f.to_str().unwrap(),
+            "content": "x",
+            "mode": "not-a-number"
+        });
+        let res = WriteTool::execute(&args);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn write_missing_content_errors() {
+        let d = tmp("no_content");
+        let f = d.join("nc.txt");
+
+        let args = json!({ "path": f.to_str().unwrap() });
+        let res = WriteTool::execute(&args);
+        assert!(res.is_err());
+    }
+}

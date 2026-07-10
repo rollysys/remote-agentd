@@ -208,7 +208,7 @@ impl PutTool {
              staged:  {} (removed)",
             abs_dest.display(),
             final_meta.size,
-            final_meta.mode,
+            final_meta.mode & 0o7777,
             final_meta.owner,
             final_meta.group,
             staging.display()
@@ -222,11 +222,185 @@ impl PutTool {
             "metadata": {
                 "dest": abs_dest.to_string_lossy(),
                 "size": final_meta.size,
-                "mode": format!("{:o}", final_meta.mode),
+                "mode": format!("{:o}", final_meta.mode & 0o7777),
                 "owner": final_meta.owner,
                 "group": final_meta.group,
                 "phase": 2
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "agentd_put_test_{}_{}",
+            std::process::id(),
+            name
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn phase1_creates_staging_path() {
+        let d = tmp("phase1");
+        let dest = d.join("output.txt");
+
+        let args = json!({ "path": dest.to_str().unwrap() });
+        let res = PutTool::execute(&args).unwrap();
+
+        let meta = &res["metadata"];
+        assert_eq!(meta["phase"], 1);
+        assert_eq!(meta["dest"].as_str().unwrap(), &*dest.to_string_lossy());
+
+        let staging = meta["staging_path"].as_str().unwrap();
+        assert!(staging.starts_with("/tmp/remote-agentd-staging/"));
+        assert!(Path::new(staging).exists(), "staging file should exist after phase 1");
+        assert_eq!(fs::metadata(staging).unwrap().len(), 0, "staging file should be empty placeholder");
+    }
+
+    #[test]
+    fn phase1_text_includes_scp_instructions() {
+        let d = tmp("instr");
+        let dest = d.join("out.bin");
+
+        let args = json!({ "path": dest.to_str().unwrap() });
+        let res = PutTool::execute(&args).unwrap();
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("staging_path"));
+        assert!(text.contains("scp") || text.contains("rsync"));
+        assert!(text.contains("phase 1/2"));
+    }
+
+    #[test]
+    fn commit_without_staging_path_errors() {
+        let d = tmp("no_staging");
+        let dest = d.join("out.txt");
+
+        let args = json!({ "path": dest.to_str().unwrap(), "commit": true });
+        let res = PutTool::execute(&args);
+        assert!(res.is_err());
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("staging_path"));
+    }
+
+    #[test]
+    fn commit_renames_and_applies_default_mode() {
+        let d = tmp("commit");
+        let dest = d.join("final.txt");
+
+        // Phase 1: create staging.
+        let args1 = json!({ "path": dest.to_str().unwrap() });
+        let res1 = PutTool::execute(&args1).unwrap();
+        let staging = res1["metadata"]["staging_path"].as_str().unwrap();
+
+        // Simulate client upload: write content to staging path.
+        fs::write(staging, "uploaded content\n").unwrap();
+
+        // Phase 2: commit.
+        let args2 = json!({
+            "path": dest.to_str().unwrap(),
+            "commit": true,
+            "staging_path": staging
+        });
+        let res2 = PutTool::execute(&args2).unwrap();
+
+        let meta = &res2["metadata"];
+        assert_eq!(meta["phase"], 2);
+        assert_eq!(meta["size"], 17);
+        assert_eq!(meta["dest"].as_str().unwrap(), &*dest.to_string_lossy());
+
+        // File should now exist at destination with correct content.
+        assert!(dest.exists(), "dest file should exist after commit");
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "uploaded content\n");
+        assert!(!Path::new(staging).exists(), "staging file should be removed after commit");
+    }
+
+    #[test]
+    fn commit_with_explicit_mode() {
+        let d = tmp("mode");
+        let dest = d.join("mode_test.txt");
+
+        // Phase 1.
+        let staging = PutTool::execute(&json!({ "path": dest.to_str().unwrap() }))
+            .unwrap()["metadata"]["staging_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        fs::write(&staging, "data").unwrap();
+
+        // Phase 2 with mode 0o600.
+        let args2 = json!({
+            "path": dest.to_str().unwrap(),
+            "commit": true,
+            "staging_path": staging,
+            "mode": "600"
+        });
+        let res2 = PutTool::execute(&args2).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "mode should be 0600 after commit");
+        }
+
+        let meta = &res2["metadata"];
+        assert_eq!(meta["mode"], "600");
+    }
+
+    #[test]
+    fn commit_empty_staging_errors() {
+        let d = tmp("empty");
+        let dest = d.join("empty.txt");
+
+        // Phase 1 creates empty staging.
+        let staging = PutTool::execute(&json!({ "path": dest.to_str().unwrap() }))
+            .unwrap()["metadata"]["staging_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Don't upload anything — staging is still empty (0 bytes).
+        let args2 = json!({
+            "path": dest.to_str().unwrap(),
+            "commit": true,
+            "staging_path": staging
+        });
+        let res = PutTool::execute(&args2);
+        assert!(res.is_err());
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn commit_creates_parent_dirs() {
+        let d = tmp("parents");
+        let dest = d.join("nested/deep/dir/output.txt");
+
+        let staging = PutTool::execute(&json!({ "path": dest.to_str().unwrap() }))
+            .unwrap()["metadata"]["staging_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        fs::write(&staging, "content").unwrap();
+
+        let args2 = json!({
+            "path": dest.to_str().unwrap(),
+            "commit": true,
+            "staging_path": staging
+        });
+        PutTool::execute(&args2).unwrap();
+
+        assert!(dest.exists());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "content");
     }
 }
