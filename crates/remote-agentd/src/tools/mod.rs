@@ -113,6 +113,11 @@ pub struct ToolResult {
     /// `true` when the tool ran but the operation itself failed
     /// (e.g. non-zero exit code from `remote_bash`). Maps to `"isError"`.
     pub is_error: bool,
+
+    /// Optional structured metadata (e.g. fetch/put return abs_path, size,
+    /// sha256, mode, owner for programmatic clients). Omitted from JSON when
+    /// empty so non-metadata tools are unaffected.
+    pub metadata: Option<Value>,
 }
 
 impl ToolResult {
@@ -121,6 +126,7 @@ impl ToolResult {
         Self {
             content: vec![ContentBlock::text(text)],
             is_error: false,
+            metadata: None,
         }
     }
 
@@ -129,15 +135,20 @@ impl ToolResult {
         Self {
             content: vec![ContentBlock::text(text)],
             is_error: true,
+            metadata: None,
         }
     }
 
     /// Convert to the MCP `result` JSON value for `tools/call`.
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut result = json!({
             "content": self.content.iter().map(ContentBlock::to_json).collect::<Vec<_>>(),
             "isError": self.is_error
-        })
+        });
+        if let Some(meta) = &self.metadata {
+            result["metadata"] = meta.clone();
+        }
+        result
     }
 }
 
@@ -469,7 +480,6 @@ impl Default for ToolRegistry {
 /// Accepts either:
 ///   - `{"content":[{"type":"text","text":"…"}], "isError": bool}` (full), or
 ///   - a bare string (treated as a single text block), or
-///   - any other JSON (stringified as a single text block).
 fn result_from_json(v: Value) -> ToolResult {
     // Full MCP result object.
     if let Some(obj) = v.as_object() {
@@ -484,7 +494,7 @@ fn result_from_json(v: Value) -> ToolResult {
                                 .get("text")
                                 .and_then(|t| t.as_str())
                                 .map(ContentBlock::text)
- })
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -492,7 +502,8 @@ fn result_from_json(v: Value) -> ToolResult {
                 .get("isError")
                 .and_then(|e| e.as_bool())
                 .unwrap_or(false);
-            return ToolResult { content, is_error };
+            let metadata = obj.get("metadata").cloned();
+            return ToolResult { content, is_error, metadata };
         }
     }
     // Bare string → single text block.
