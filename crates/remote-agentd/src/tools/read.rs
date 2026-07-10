@@ -24,9 +24,20 @@ impl ReadTool {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("`path` is required and must be a string"))?;
+        let sudo = args.get("sudo").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let (path_str, selector) = parse_selector(raw_path);
         let path = Path::new(&path_str);
+
+        if sudo {
+            // sudo path: use sudo-aware stat + read to handle root-owned files.
+            let meta = crate::tools::sudo::file_metadata_sudo(path)
+                .map_err(|e| anyhow!("Cannot stat {}: {}", path_str, e))?;
+            if meta.is_dir {
+                return Self::read_directory(&path_str);
+            }
+            return Self::read_file_sudo(&path_str, selector);
+        }
 
         if !path.exists() {
             return Err(anyhow!("File not found: {}", path_str));
@@ -86,6 +97,18 @@ impl ReadTool {
     fn read_file(path_str: &str, selector: Option<Selector>) -> Result<Value> {
         let content = fs::read_to_string(Path::new(path_str))
             .map_err(|e| anyhow!("Failed to read {}: {}", path_str, e))?;
+        Self::format_file_content(path_str, &content, selector)
+    }
+
+    /// sudo variant: reads file via `sudo -n cat`.
+    fn read_file_sudo(path_str: &str, selector: Option<Selector>) -> Result<Value> {
+        let content = crate::tools::sudo::read_file(Path::new(path_str), true)
+            .map_err(|e| anyhow!("Failed to sudo-read {}: {}", path_str, e))?;
+        Self::format_file_content(path_str, &content, selector)
+    }
+
+    /// Format file content with optional selector (shared by sudo/non-sudo paths).
+    fn format_file_content(path_str: &str, content: &str, selector: Option<Selector>) -> Result<Value> {
 
         // Raw mode: no header, no line numbers.
         if matches!(selector, Some(Selector::Raw)) {

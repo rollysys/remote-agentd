@@ -11,6 +11,9 @@ pub mod search;
 pub mod bash;
 pub mod find;
 pub mod write;
+pub mod fetch;
+pub mod put;
+pub mod sudo;
 
 use serde_json::{json, Value};
 
@@ -191,6 +194,10 @@ impl ToolRegistry {
                             "path": {
                                 "type": "string",
                                 "description": "Remote file/directory path, may include :selector"
+                            },
+                            "sudo": {
+                                "type": "boolean",
+                                "description": "Use sudo to read root-owned files via `sudo -n cat` (default false)"
                             }
                         },
                         "required": ["path"]
@@ -208,6 +215,10 @@ impl ToolRegistry {
                             "input": {
                                 "type": "string",
                                 "description": "Hashline patch language input"
+                            },
+                            "sudo": {
+                                "type": "boolean",
+                                "description": "Edit root-owned files: reads via `sudo -n cat` into temp, applies patch, writes back via `sudo -n tee` with original mode/owner restored (default false)"
                             }
                         },
                         "required": ["input"]
@@ -266,7 +277,11 @@ impl ToolRegistry {
                             "env": {
                                 "type": "object",
                                 "description": "Environment variables"
-                            }
+                            },
+                            "sudo": {
+                                "type": "boolean",
+                                "description": "Run command as root via `sudo -n` (requires NOPASSWD sudoers, default false)"
+                            },
                         },
                         "required": ["command"]
                     }),
@@ -308,9 +323,84 @@ impl ToolRegistry {
                             "content": {
                                 "type": "string",
                                 "description": "File content"
+                            },
+                            "sudo": {
+                                "type": "boolean",
+                                "description": "Use sudo to write root-owned files via `sudo -n tee` (default false)"
+                            },
+                            "mode": {
+                                "type": "string",
+                                "description": "Octal permission bits after write, e.g. \"755\" or \"0o644\" (requires sudo or daemon root)"
+                            },
+                            "owner": {
+                                "type": "string",
+                                "description": "Owner[:group] after write, e.g. \"root\" or \"app:app\" (requires sudo)"
                             }
                         },
                         "required": ["path", "content"]
+                    }),
+                    handler: None,
+                },
+                ToolEntry {
+                    name: "remote_fetch",
+                    description: "Prepare a large file for sideband transfer (scp/rsync) off the MCP channel. \
+                         Returns absolute path, size, sha256, mode, owner, group. \
+                         The client opens a separate SSH/scp/rsync connection to pull the file — \
+                         file bytes never transit the MCP/LLM context. \
+                         Pass sudo:true for root-owned files (requires NOPASSWD sudoers).",
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Remote file path (must be a file, not directory)"
+                            },
+                            "sudo": {
+                                "type": "boolean",
+                                "description": "Use sudo to stat root-owned files (default false)"
+                            }
+                        },
+                        "required": ["path"]
+                    }),
+                    handler: None,
+                },
+                ToolEntry {
+                    name: "remote_put",
+                    description: "Upload a large file via sideband transfer (scp/rsync), bypassing the \
+                         MCP/LLM context window. Two phases: (1) without commit — daemon creates a \
+                         staging path under /tmp and returns it; client scp/rsync uploads there over a \
+                         separate SSH channel. (2) with commit:true — daemon atomically renames the \
+                         staged file to the destination, applies mode/owner, cleans up. \
+                         Pass sudo:true for root-owned destinations.",
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Destination file path"
+                            },
+                            "commit": {
+                                "type": "boolean",
+                                "description": "Phase 2: finalize the upload by renaming staged file into place (default false = phase 1)"
+                            },
+                            "staging_path": {
+                                "type": "string",
+                                "description": "Required for commit phase: the staging path returned by phase 1"
+                            },
+                            "sudo": {
+                                "type": "boolean",
+                                "description": "Use sudo for root-owned destinations (default false)"
+                            },
+                            "mode": {
+                                "type": "string",
+                                "description": "Octal permission bits, e.g. \"755\" or \"0o644\" (default: preserve original or 644)"
+                            },
+                            "owner": {
+                                "type": "string",
+                                "description": "Owner[:group], e.g. \"root\" or \"app:app\" (default: preserve original)"
+                            }
+                        },
+                        "required": ["path"]
                     }),
                     handler: None,
                 },
@@ -452,8 +542,10 @@ tool_wrapper!(SearchToolWrapper, search, SearchTool, "remote_search");
 tool_wrapper!(BashToolWrapper, bash, BashTool, "remote_bash");
 tool_wrapper!(FindToolWrapper, find, FindTool, "remote_find");
 tool_wrapper!(WriteToolWrapper, write, WriteTool, "remote_write");
+tool_wrapper!(FetchToolWrapper, fetch, FetchTool, "remote_fetch");
+tool_wrapper!(PutToolWrapper, put, PutTool, "remote_put");
 
-/// Register all 6 tool handlers with the MCP handler.
+/// Register all 8 tool handlers with the MCP handler.
 /// Called from `main.rs` at startup.
 pub fn register_all(handler: &mut crate::mcp::McpHandler) {
     handler.register_tool(Box::new(ReadToolWrapper));
@@ -462,4 +554,6 @@ pub fn register_all(handler: &mut crate::mcp::McpHandler) {
     handler.register_tool(Box::new(BashToolWrapper));
     handler.register_tool(Box::new(FindToolWrapper));
     handler.register_tool(Box::new(WriteToolWrapper));
+    handler.register_tool(Box::new(FetchToolWrapper));
+    handler.register_tool(Box::new(PutToolWrapper));
 }

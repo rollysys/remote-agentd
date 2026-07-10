@@ -23,6 +23,7 @@ impl BashTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("`command` is required and must be a string"))?;
 
+        let sudo = args.get("sudo").and_then(|v| v.as_bool()).unwrap_or(false);
         let cwd = args.get("cwd").and_then(|v| v.as_str());
         let timeout_secs = args
             .get("timeout")
@@ -30,8 +31,19 @@ impl BashTool {
             .unwrap_or(60);
         let env_obj = args.get("env").and_then(|v| v.as_object());
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
+        // When sudo is requested, wrap the command in `sudo -n sh -c "..."`.
+        // `-n` ensures non-interactive mode (fails fast if NOPASSWD is not
+        // configured, instead of hanging on a password prompt that would
+        // deadlock the MCP stdio loop).
+        let mut cmd = if sudo {
+            let mut c = Command::new("sudo");
+            c.arg("-n").arg("sh").arg("-c").arg(command);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(command);
+            c
+        };
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 

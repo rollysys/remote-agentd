@@ -6,8 +6,7 @@
 //! Supported methods:
 //!   - `initialize`              → server info + capabilities
 //!   - `notifications/initialized` → no response (notification)
-//!   - `tools/list`              → 6 tool definitions
-//!   - `tools/call`              → dispatch to registered tool
+//!   - `tools/list`              → 8 tool definitions
 //!   - `ping`                    → empty result
 //!
 //! Unknown methods with an `id` → JSON-RPC error -32601.
@@ -113,7 +112,7 @@ impl McpHandler {
                         },
                         "serverInfo": {
                             "name": "remote-agentd",
-                            "version": "0.1.0"
+                            "version": env!("CARGO_PKG_VERSION")
                         }
                     }
                 })]
@@ -284,17 +283,17 @@ mod tests {
         let resp = req_id(&mut h, "initialize", json!({}));
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["serverInfo"]["name"], "remote-agentd");
-        assert_eq!(resp["result"]["serverInfo"]["version"], "0.1.0");
+        assert_eq!(resp["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], false);
     }
 
     #[test]
-    fn tools_list_returns_six_tools() {
+    fn tools_list_returns_eight_tools() {
         let mut h = McpHandler::new();
         let resp = req_id(&mut h, "tools/list", json!({}));
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"remote_read"));
         assert!(names.contains(&"remote_edit"));
@@ -302,6 +301,8 @@ mod tests {
         assert!(names.contains(&"remote_bash"));
         assert!(names.contains(&"remote_find"));
         assert!(names.contains(&"remote_write"));
+        assert!(names.contains(&"remote_fetch"));
+        assert!(names.contains(&"remote_put"));
     }
 
     #[test]
