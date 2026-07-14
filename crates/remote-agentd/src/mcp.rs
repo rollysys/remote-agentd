@@ -19,7 +19,7 @@ use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 // JSON-RPC error codes
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const PARSE_ERROR: i64 = -32700;
+pub const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
@@ -249,7 +249,7 @@ impl Default for McpHandler {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Build a JSON-RPC error response.
-fn json_error(id: Value, code: i64, message: &str) -> Value {
+pub fn json_error(id: Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
