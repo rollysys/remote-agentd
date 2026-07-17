@@ -54,31 +54,12 @@ impl PutTool {
         }
     }
 
-    /// Phase 1: create staging dir + return a unique staging path for the
-    /// client to upload to.
+    /// Phase 1: create staging file in the SAME directory as the destination,
+    /// so that `rename(2)` in the commit phase is atomic (same filesystem).
+    /// Using a fixed staging dir like /tmp would fail with EXDEV when the
+    /// destination is on a different mount (common in Docker: /tmp is overlay,
+    /// /data is a volume mount).
     fn prepare_stage(dest: &Path, sudo: bool) -> Result<Value> {
-        mkdir_all(std::path::Path::new(STAGING_DIR), sudo)
-            .map_err(|e| anyhow!("Failed to create staging dir {}: {}", STAGING_DIR, e))?;
-
-        // Unique staging name based on destination + pid + timestamp.
-        let staging_name = format!(
-            "{}.{}.{}",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "upload".to_string()),
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let staging_path = PathBuf::from(STAGING_DIR).join(&staging_name);
-
-        // Create an empty file so the staging path exists (some clients expect
-        // this); the client will overwrite it via scp/rsync.
-        touch(&staging_path, sudo)
-            .map_err(|e| anyhow!("Failed to create staging file {}: {}", staging_path.display(), e))?;
-
         let abs_dest = if dest.is_absolute() {
             dest.to_path_buf()
         } else {
@@ -86,6 +67,41 @@ impl PutTool {
                 .map_err(|e| anyhow!("Cannot resolve cwd: {}", e))?
                 .join(dest)
         };
+
+        // Stage in the destination's parent directory to avoid cross-device
+        // rename (EXDEV). Fallback to /tmp only if we can't determine the
+        // parent (e.g. dest is "/" or has no parent).
+        let staging_dir = abs_dest
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(STAGING_DIR));
+
+        // Ensure the staging directory exists.
+        mkdir_all(&staging_dir, sudo)
+            .map_err(|e| anyhow!("Failed to create staging dir {}: {}", staging_dir.display(), e))?;
+
+        // Unique staging name: `.dest_filename.agentd-staging.pid.timestamp`
+        // Hidden file (dot-prefix) to avoid clutter; includes pid + nanos for uniqueness.
+        let dest_name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "upload".to_string());
+        let staging_name = format!(
+            ".{}.agentd-staging.{}.{}",
+            dest_name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let staging_path = staging_dir.join(&staging_name);
+
+        // Create an empty file so the staging path exists (some clients expect
+        // this); the client will overwrite it via scp/rsync.
+        touch(&staging_path, sudo)
+            .map_err(|e| anyhow!("Failed to create staging file {}: {}", staging_path.display(), e))?;
+
 
         let text = format!(
             "remote_put: staging ready (phase 1/2)\n\
@@ -260,7 +276,7 @@ mod tests {
         assert_eq!(meta["dest"].as_str().unwrap(), &*dest.to_string_lossy());
 
         let staging = meta["staging_path"].as_str().unwrap();
-        assert!(staging.starts_with("/tmp/remote-agentd-staging/"));
+        assert!(staging.starts_with(&format!("{}/", d.to_string_lossy())), "staging should be in dest parent dir, got: {}", staging);
         assert!(Path::new(staging).exists(), "staging file should exist after phase 1");
         assert_eq!(fs::metadata(staging).unwrap().len(), 0, "staging file should be empty placeholder");
     }
@@ -402,5 +418,34 @@ mod tests {
 
         assert!(dest.exists());
         assert_eq!(fs::read_to_string(&dest).unwrap(), "content");
+    }
+
+    #[test]
+    fn staging_in_dest_parent_dir_not_tmp() {
+        // Staging file should be in the same directory as the destination,
+        // NOT in /tmp. This prevents EXDEV (cross-device rename) when the
+        // destination is on a different mount (e.g. Docker volume mount).
+        let d = tmp("samelocation");
+        let dest = d.join("target.txt");
+
+        let staging = PutTool::execute(&json!({ "path": dest.to_str().unwrap() }))
+            .unwrap()["metadata"]["staging_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Staging should be in d/, not in /tmp
+        assert!(
+            staging.starts_with(&format!("{}/", d.to_string_lossy())),
+            "staging should be in dest parent dir ({}), got: {}",
+            d.display(),
+            staging
+        );
+        assert!(!staging.starts_with("/tmp/"), "staging should NOT be in /tmp");
+
+        // Should be a hidden file (dot-prefixed)
+        let staging_name = Path::new(&staging).file_name().unwrap().to_string_lossy();
+        assert!(staging_name.starts_with('.'), "staging file should be hidden (dot-prefixed), got: {}", staging_name);
+        assert!(staging_name.contains("agentd-staging"), "staging name should contain 'agentd-staging'");
     }
 }
